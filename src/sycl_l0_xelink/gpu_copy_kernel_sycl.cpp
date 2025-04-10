@@ -57,6 +57,10 @@ int main(int argc, char **argv) {
     if (argc > 3) {
         num_devices = atoi(argv[3]);
     }
+    int use_copy = 0;
+    if (argc > 4) {
+        use_copy = atoi(argv[4]);
+    }
 
     std::vector<sycl::queue> q_vec;
     for (int i=0; i<num_devices; i++) {
@@ -94,38 +98,56 @@ int main(int argc, char **argv) {
         //constexpr int work_group_size = 32;
 
         for (int i=0; i<num_devices; i++) {
-            auto e = q_vec[i].submit([=](sycl::handler &h) {
-                h.parallel_for(N, [=](sycl::id<1> idx) {
-                //h.parallel_for(sycl::nd_range(sycl::range{N}, sycl::range{work_group_size}), [=](sycl::nd_item<1> it) {
-                    //const size_t idx = it.get_global_linear_id();
-                    if (write) {
-                        long data = in_buffs[i][idx];
-                        #pragma unroll
-                        for (int j = 0; j < num_devices; j++) {
-                            out_buffs[j][i * N + idx] = data;
+            sycl::event e;
+            if (!use_copy) {
+                e = q_vec[i].submit([=](sycl::handler &h) {
+                    h.parallel_for(N, [=](sycl::id<1> idx) {
+                    //h.parallel_for(sycl::nd_range(sycl::range{N}, sycl::range{work_group_size}), [=](sycl::nd_item<1> it) {
+                        //const size_t idx = it.get_global_linear_id();
+                        if (write) {
+                            long data = in_buffs[i][idx];
+                            #pragma unroll
+                            for (int j = 0; j < num_devices; j++) {
+                                out_buffs[j][i * N + idx] = data;
+                            }
+                            /*
+                            out_buffs[0][i * N + idx] = data;
+                            out_buffs[1][i * N + idx] = data;
+                            out_buffs[2][i * N + idx] = data;
+                            out_buffs[3][i * N + idx] = data;
+                            */
                         }
-                        /*
-                        out_buffs[0][i * N + idx] = data;
-                        out_buffs[1][i * N + idx] = data;
-                        out_buffs[2][i * N + idx] = data;
-                        out_buffs[3][i * N + idx] = data;
-                        */
+                        else {
+                            #pragma unroll
+                            for (int j = 0; j < num_devices; j++) {
+                                out_buffs[i][j * N + idx] = in_buffs[j][idx];
+                            }
+                            /*
+                            out_buffs[i][0 * N + idx] = in_buffs[0][idx];
+                            out_buffs[i][1 * N + idx] = in_buffs[1][idx];
+                            out_buffs[i][2 * N + idx] = in_buffs[2][idx];
+                            out_buffs[i][3 * N + idx] = in_buffs[3][idx];
+                            */
+
+                        }
+                    });
+                });
+            } else {
+                for (int j = 0; j < num_devices; j++) {
+                    if (write) {
+                        e = q_vec[i].submit([=](sycl::handler &h) {
+                            h.depends_on(e);
+                            h.memcpy(out_buffs[j] + i * N, in_buffs[i], N * sizeof(long));
+                        });
                     }
                     else {
-                        #pragma unroll
-                        for (int j = 0; j < num_devices; j++) {
-                            out_buffs[i][j * N + idx] = in_buffs[j][idx];
-                        }
-                        /*
-                        out_buffs[i][0 * N + idx] = in_buffs[0][idx];
-                        out_buffs[i][1 * N + idx] = in_buffs[1][idx];
-                        out_buffs[i][2 * N + idx] = in_buffs[2][idx];
-                        out_buffs[i][3 * N + idx] = in_buffs[3][idx];
-                        */
-
+                        e = q_vec[i].submit([=](sycl::handler &h) {
+                            h.depends_on(e);
+                            h.memcpy(out_buffs[i] + j * N, in_buffs[j], N * sizeof(long));
+                        });
                     }
-                });
-            });
+                }
+            }
             e_vec.push_back(e);
         }
 
