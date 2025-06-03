@@ -4,7 +4,7 @@
     This data transfer will make use of Xelink.
 */
 
-#include<sycl.hpp>
+#include<sycl/sycl.hpp>
 #include<iostream>
 #include<chrono>
 
