@@ -32,6 +32,7 @@ class rank_entry;
 size_t num_threads = 4;
 size_t buffer_count = 32 * 1024 * 1024;
 int is_write = 1;
+int use_copy = 0;
 bool print_result_buffer = false;
 bool verbose = false;
 constexpr size_t warmup_iter = 15;
@@ -101,7 +102,7 @@ void get_copy_queue_ordinal(ze_device_handle_t device,
         if (((props[i].flags &
                 ZE_COMMAND_QUEUE_GROUP_PROPERTY_FLAG_COMPUTE) == 0) &&
             (props[i].flags &
-            ZE_COMMAND_QUEUE_GROUP_PROPERTY_FLAG_COPY) && props[i].numQueues > 1) {
+            ZE_COMMAND_QUEUE_GROUP_PROPERTY_FLAG_COPY) && props[i].numQueues >= 1) {
             copy_ordinal = i;
             break;
         }
@@ -136,7 +137,7 @@ void print_buffer(size_t rank_id, const void* buf) {
     std::stringstream ss;
     ss << "rank " << rank_id << ":";
     for (size_t i = 0; i < buffer_count; ++i) {
-        ss << " " << ((int*)buf)[i];
+        ss << " " << ((long*)buf)[i];
     }
     ss << std::endl;
     std::cout << ss.str();
@@ -224,34 +225,53 @@ public:
             peer_bufs.push_back(ptr);
         }
 
-        uint32_t groupSizeX = 1u;
-        uint32_t groupSizeY = 1u;
-        uint32_t groupSizeZ = 1u;
+        ze_event_handle_t kernel_event;
 
-        ze_group_count_t threadGroupCount{};
-        threadGroupCount.groupCountX = 1u;
-        threadGroupCount.groupCountY = 1u;
-        threadGroupCount.groupCountZ = 1u;
+        if (!use_copy) {
+            uint32_t groupSizeX = 1u;
+            uint32_t groupSizeY = 1u;
+            uint32_t groupSizeZ = 1u;
 
-        zeCall(zeKernelSuggestGroupSize(kernel, buffer_count, 1u, 1u, &groupSizeX, &groupSizeY, &groupSizeZ));
-        threadGroupCount.groupCountX = buffer_count / groupSizeX;
+            ze_group_count_t threadGroupCount{};
+            threadGroupCount.groupCountX = 1u;
+            threadGroupCount.groupCountY = 1u;
+            threadGroupCount.groupCountZ = 1u;
 
-        zeCall(zeKernelSetGroupSize(kernel, groupSizeX, groupSizeY, groupSizeZ));
-        for (size_t i = 0; i < peer_bufs.size(); i++) {
-            zeCall(zeKernelSetArgumentValue(kernel, i, sizeof(peer_bufs[i]), &peer_bufs[i]));
+            zeCall(zeKernelSuggestGroupSize(kernel, buffer_count, 1u, 1u, &groupSizeX, &groupSizeY, &groupSizeZ));
+            threadGroupCount.groupCountX = buffer_count / groupSizeX;
+
+            zeCall(zeKernelSetGroupSize(kernel, groupSizeX, groupSizeY, groupSizeZ));
+            for (size_t i = 0; i < peer_bufs.size(); i++) {
+                zeCall(zeKernelSetArgumentValue(kernel, i, sizeof(peer_bufs[i]), &peer_bufs[i]));
+            }
+            void* local_buf = is_write ? send_bufs.at(rank_id) : recv_bufs.at(rank_id);
+            zeCall(zeKernelSetArgumentValue(kernel, peer_bufs.size(), sizeof(local_buf), &local_buf));
+
+            zeCall(zeKernelSetArgumentValue(kernel, peer_bufs.size()+1, sizeof(buffer_count), &buffer_count));
+
+            zeCall(zeKernelSetArgumentValue(kernel, peer_bufs.size()+2, sizeof(is_write), &is_write));
+
+            zeCall(zeKernelSetArgumentValue(kernel, peer_bufs.size()+3, sizeof(rank_id), &rank_id));
+
+            kernel_event = create_event();
+            zeCall(zeCommandListAppendLaunchKernel(get_local_comp_list(), kernel, &threadGroupCount, kernel_event,
+                    0, nullptr));
         }
-        void* local_buf = is_write ? send_bufs.at(rank_id) : recv_bufs.at(rank_id);
-        zeCall(zeKernelSetArgumentValue(kernel, peer_bufs.size(), sizeof(local_buf), &local_buf));
-
-        zeCall(zeKernelSetArgumentValue(kernel, peer_bufs.size()+1, sizeof(buffer_count), &buffer_count));
-
-        zeCall(zeKernelSetArgumentValue(kernel, peer_bufs.size()+2, sizeof(is_write), &is_write));
-
-        zeCall(zeKernelSetArgumentValue(kernel, peer_bufs.size()+3, sizeof(rank_id), &rank_id));
-
-        auto kernel_event = create_event();
-        zeCall(zeCommandListAppendLaunchKernel(get_local_comp_list(), kernel, &threadGroupCount, kernel_event,
-                0, nullptr));
+        else {
+            ze_event_handle_t prev_event = nullptr;
+            for (size_t i = 0; i < ranks.size(); i++) {
+                kernel_event = create_event();
+                if (is_write) {
+                    zeCall(zeCommandListAppendMemoryCopy(get_local_copy_list(0), (long *)recv_bufs[i] + rank_id * buffer_count, send_bufs[rank_id], buffer_bytes, kernel_event,
+                        i?1:0, i?&prev_event:nullptr));
+                }
+                else {
+                    zeCall(zeCommandListAppendMemoryCopy(get_local_copy_list(0), (long *)recv_bufs.at(rank_id) + i * buffer_count, send_bufs.at(i), buffer_bytes, kernel_event,
+                        i?1:0, i?&prev_event:nullptr));
+                }
+                prev_event = kernel_event;
+            }
+        }
 
         auto entry_event = kernel_event;
 
@@ -567,6 +587,9 @@ int main(int argc, char *argv[]) {
     }
     if (argc > 3) {
         num_threads = atoi(argv[3]);
+    }
+    if (argc > 4) {
+        use_copy = atoi(argv[4]);
     }
 
     bench_iter = get_iter_count(buffer_count * sizeof(long), max_bench_iter);
