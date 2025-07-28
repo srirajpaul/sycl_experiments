@@ -73,7 +73,9 @@ int main(int argc, char **argv) {
     long *out_buffs[dev_count], *in_buffs[dev_count];
     for (int i=0; i<num_devices; i++) {
         in_buffs[i] = sycl::malloc_device<long>(N,q_vec[i]);
+        assert(in_buffs[i]);
         out_buffs[i] = sycl::malloc_device<long>(N * num_devices,q_vec[i]);
+        assert(out_buffs[i]);
         q_vec[i].submit([&](sycl::handler &h) {
             h.parallel_for(N, [=](sycl::id<1> idx) {
                 in_buffs[i][idx] = 23;
