@@ -35,7 +35,7 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    constexpr int num_gpus = 4;
+    constexpr int num_gpus = 3;
     const int N = (argc >= 2) ? atol(argv[1]) : 4;
 
     std::cout<<"num GPUs "<<devices.size()<<"\n";
@@ -92,10 +92,38 @@ int main(int argc, char *argv[]) {
             int dest = (i + 1) % num_gpus;
             evts[i] = q[i].parallel_for(N/NT, [=](sycl::id<1> it) {
                 const size_t idx = it;
+
+                double sum = 0;
+
+                #if 0
+                if (i == 1) {
+                    for (size_t j = 0; j < 1000000; j++) {
+                        sum += j;
+                    }
+                }
+                #endif
+
                 // remote write
                 ((AT*)(tmp_ptrs[dest][n+1]))[idx] = ((AT*)(tmp_ptrs[i][n]))[idx];
+
+                // dummy add and subtract
+                ((AT*)(tmp_ptrs[i][n]))[idx] = ((AT*)(tmp_ptrs[i][n]))[idx] + sum;
+                ((AT*)(tmp_ptrs[i][n]))[idx] = ((AT*)(tmp_ptrs[i][n]))[idx] - sum;
+
+                //sycl::atomic_fence(sycl::memory_order::seq_cst, sycl::memory_scope::system);
+                //((AT*)(tmp_ptrs[i][n]))[idx] = ((AT*)(tmp_ptrs[dest][n+1]))[idx];
             });
         }
+
+        #if 0
+        for(int i=0 ; i < num_gpus; i++) {
+            q[i].submit([=](sycl::handler &h) {
+                h.host_task([=]() {
+                   sleep(2);
+                });
+            });
+        }
+        #endif
 
         // gpu i depends on gpu i-1
         for(int i=0 ; i < num_gpus; i++) {
@@ -105,6 +133,7 @@ int main(int argc, char *argv[]) {
                 h.parallel_for(N/NT, [=](sycl::item<1> it) {
                     const size_t idx = it.get_id();
                     // local reduce
+                    //sycl::atomic_fence(sycl::memory_order::seq_cst, sycl::memory_scope::system);
                     ((AT*)(dst_ptrs[i]))[idx] += ((AT*)(tmp_ptrs[i][n+1]))[idx];
                 });
             });
@@ -131,13 +160,16 @@ int main(int argc, char *argv[]) {
               if (print_all) {
                 std::cout<<"gpu "<<i<<" index "<<idx<<" val "<<dst_host_ptrs[i][idx]<<" exp "<<expected_value<<"\n";
               }
-              else if (src_host_ptrs[src][idx] != dst_host_ptrs[i][idx]) {
+              else if (dst_host_ptrs[src][idx] != expected_value) {
                 std::cout<<"gpu "<<i<<" index "<<idx<<" val "<<dst_host_ptrs[i][idx]<<" exp "<<expected_value<<"\n";
                 break;
               }
             }
           });
         });
+    }
+    for(int i=0 ; i < num_gpus; i++) {
+        q[i].wait();
     }
 
     return 0;
